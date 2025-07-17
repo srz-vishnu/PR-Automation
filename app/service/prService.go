@@ -96,60 +96,68 @@ func (s *prServiceImpl) LoginUser(r *http.Request) (*dto.LoginResponse, error) {
 func (s *prServiceImpl) SaveEmployeePR(r *http.Request) error {
 	args := &dto.SaveEmployeePRRequest{}
 
-	// Parse request body
+	// Parse request
 	err := args.Parse(r)
 	if err != nil {
 		return e.NewError(e.ErrDecodeRequestBody, "error while parsing", err)
 	}
 
-	//  Validate input
+	// Validate
 	err = args.Validate()
 	if err != nil {
 		return e.NewError(e.ErrValidateRequest, "error while validating", err)
 	}
 	log.Info().Msg("Successfully parsed and validated SaveEmployeePR request")
 
-	//  Check if employee exists
-	employee, err := s.prRepo.GetEmployeeByEmpID(args.StaffID)
-	if err != nil {
-		return e.NewError(e.ErrResourceNotFound, "employee not found", err)
-	}
-
-	// Check if PR already exists for this employee
-	existingPR, err := s.prRepo.GetPRByEmpIDAndLink(employee.ID, args.PRLink)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return e.NewError(e.ErrPrCheckingFailed, "failed to check existing PR", err)
-	}
-
 	now := time.Now()
 
-	if existingPR != nil {
-		//Update `updated_at` and pr_link (if needed)
-		existingPR.PRLink = args.PRLink
-		existingPR.UpdatedAt = &now
-		err := s.prRepo.UpdatePullRequest(existingPR)
+	// Process each PR
+	for _, pr := range args.PRs {
+		employee, err := s.prRepo.GetEmployeeByEmpID(pr.StaffID)
 		if err != nil {
-			return e.NewError(e.ErrUpdatePr, "failed to update existing PR", err)
+			log.Error().Err(err).Msgf("Employee not found for staff ID %s", pr.StaffID)
+			return e.NewError(e.ErrResourceNotFound, "employee not found", err)
+			//continue // Skip and continue with other PRs
 		}
-		log.Info().Msg("PR already existed, updated timestamp")
-		return nil
+
+		existingPR, err := s.prRepo.GetPRByEmpIDAndLink(employee.ID, pr.PRLink)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return e.NewError(e.ErrPrCheckingFailed, "failed to check existing PR", err)
+		}
+
+		if existingPR != nil {
+			existingPR.PRLink = pr.PRLink
+			existingPR.UpdatedAt = &now
+			err := s.prRepo.UpdatePullRequest(existingPR)
+			if err != nil {
+				log.Error().Err(err).Msgf("Failed to update existing PR for %s", pr.PRLink)
+				return e.NewError(e.ErrUpdatePr, "failed to update existing PR", err)
+			} else {
+				log.Info().Msgf("Updated existing PR for %s", pr.PRLink)
+			}
+			continue
+		}
+
+		// Save new PR
+		newPR := &domain.PullRequest{
+			EmployeeID: employee.ID,
+			StaffID:    pr.StaffID,
+			PRLink:     pr.PRLink,
+			Status:     pr.Status,
+			CreatedAt:  &now,
+			UpdatedAt:  &now,
+		}
+
+		err = s.prRepo.SavePullRequest(newPR)
+		if err != nil {
+			log.Error().Err(err).Msgf("Failed to save new PR for %s", pr.PRLink)
+			return e.NewError(e.ErrSavePr, "failed to save new PR", err)
+			//continue
+		}
+
+		log.Info().Msgf("Successfully saved new PR for %s", pr.PRLink)
 	}
 
-	// new PR entry
-	newPR := &domain.PullRequest{
-		EmployeeID: employee.ID,
-		StaffID:    args.StaffID,
-		PRLink:     args.PRLink,
-		Status:     args.Status,
-		CreatedAt:  &now,
-		UpdatedAt:  &now,
-	}
-	err = s.prRepo.SavePullRequest(newPR)
-	if err != nil {
-		return e.NewError(e.ErrSavePr, "failed to save new PR", err)
-	}
-
-	log.Info().Msg("Successfully saved new pull request")
 	return nil
 }
 

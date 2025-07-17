@@ -30,13 +30,6 @@ func (args *PRDetailsEmployeeID) Parse(r *http.Request) error {
 	if strID == "" {
 		return fmt.Errorf("id parameter is missing or empty")
 	}
-	// intID, err := strconv.Atoi(strID)
-	// if err != nil {
-	// 	return err
-	// }
-	// args.StaffID = int64(intID)
-	// return nil
-
 	args.StaffID = strID
 	return nil
 }
