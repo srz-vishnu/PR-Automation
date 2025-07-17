@@ -177,67 +177,73 @@ func (s *prServiceImpl) GeneratePRDetails(r *http.Request) (*dto.PRDetailsRespon
 	}
 	log.Info().Msg("Successfully completed parsing and validation of request body")
 
-	//  validating employee is there on db
-	pr, err := s.prRepo.ValidPRByEmpID(args.StaffID)
-	if err != nil {
-		return nil, e.NewError(e.ErrResourceNotFound, "No recent PR found for this employee", err)
+	// Fetch all PRs for this employee with status open or draft
+	prs, err := s.prRepo.GetAllOpenOrDraftPRsByEmpID(args.StaffID)
+	if err != nil || len(prs) == 0 {
+		return nil, e.NewError(e.ErrResourceNotFound, "No open/draft PRs found for this employee", err)
 	}
-	log.Info().Msg("Successfully got pr")
+	log.Info().Msgf("Found %d open/draft PRs", len(prs))
 
-	//  Extract repo owner/name and PR number from pr.PRLink
-	owner, repo, prNumber, err := helper.ParsePRLink(pr.PRLink)
-	if err != nil {
-		return nil, e.NewError(e.ErrPrParse, "Invalid PR link format", err)
+	var prDetailsList []dto.SinglePRDetails
+
+	for _, pr := range prs {
+		// Extract repo owner/name and PR number from pr.PRLink
+		owner, repo, prNumber, err := helper.ParsePRLink(pr.PRLink)
+		if err != nil {
+			log.Error().Err(err).Msgf("Invalid PR link format: %s", pr.PRLink)
+			continue // skip this PR
+		}
+		log.Info().Msgf("Processing PR: owner=%s, repo=%s, prNumber=%d", owner, repo, prNumber)
+
+		// GitHub API to fetch PR details
+		prData, err := github.FetchPRDetails(owner, repo, prNumber)
+		if err != nil {
+			log.Error().Err(err).Msgf("Failed to fetch PR data from GitHub for PR: %s", pr.PRLink)
+			continue // skip this PR
+		}
+
+		// Save today's PR data to a table so we can see the daily change here
+		snapshot := &domain.PRSnapshot{
+			EmployeeID:   pr.EmployeeID,
+			Name:         owner,
+			PRID:         pr.ID,
+			Date:         time.Now().Truncate(24 * time.Hour),
+			Description:  pr.Description,
+			LinesAdded:   prData.Additions,
+			LinesRemoved: prData.Deletions,
+			FilesChanged: prData.ChangedFiles,
+			CommitCount:  prData.Commits,
+		}
+		err = s.prRepo.SavePRSnapshot(snapshot)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to save daily PR details")
+		}
+
+		err = s.prRepo.UpdatePRDetails(int64(pr.ID), prData)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to update PR details in DB")
+		}
+
+		prDetailsList = append(prDetailsList, dto.SinglePRDetails{
+			Owner:        owner,
+			Title:        prData.Title,
+			Description:  prData.Body,
+			Status:       prData.State,
+			Files:        prData.ChangedFiles,
+			LinesAdded:   prData.Additions,
+			LinesRemoved: prData.Deletions,
+			CommitCount:  prData.Commits,
+			Branch:       prData.Head.Ref,
+			PRLink:       pr.PRLink,
+		})
 	}
-	log.Info().Msg("Successfully extracted pr basic details")
-	log.Info().Msgf("owner %s:", owner)
-	log.Info().Msgf("pr num %d:", prNumber)
-	log.Info().Msgf("repo %s:", repo)
 
-	//  GitHub API to fetch PR details
-	prData, err := github.FetchPRDetails(owner, repo, prNumber)
-	// prData, err := github.FetchPRDetails(pr.PRLink)
-	if err != nil {
-		return nil, e.NewError(e.ErrGitHubAPI, "Failed to fetch PR data from GitHub", err)
-	}
-	log.Info().Msg("Successfully get github api details")
-	log.Info().Msgf("name is%s:", prData.Body)
-
-	// Save today's PR data to a table so we can see the daily chnage here
-	snapshot := &domain.PRSnapshot{
-		EmployeeID:   pr.EmployeeID,
-		Name:         owner,
-		PRID:         pr.ID,
-		Date:         time.Now().Truncate(24 * time.Hour),
-		Description:  pr.Description,
-		LinesAdded:   prData.Additions,
-		LinesRemoved: prData.Deletions,
-		FilesChanged: prData.ChangedFiles,
-		CommitCount:  prData.Commits,
+	if len(prDetailsList) == 0 {
+		return nil, e.NewError(e.ErrResourceNotFound, "No valid PR details could be fetched for this employee", nil)
 	}
 
-	err = s.prRepo.SavePRSnapshot(snapshot)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to save daily PR details")
-	}
-
-	err = s.prRepo.UpdatePRDetails(int64(pr.ID), prData)
-	if err != nil {
-		return nil, e.NewError(e.ErrUpdatingPRDetails, "failed to update PR details in DB", err)
-	}
-	log.Info().Msg("PR Details Saved")
-
-	//  responseeee
 	return &dto.PRDetailsResponse{
-		Owner:        owner,
-		Title:        prData.Title,
-		Description:  prData.Body,
-		Status:       prData.State,
-		Files:        prData.ChangedFiles,
-		LinesAdded:   prData.Additions,
-		LinesRemoved: prData.Deletions,
-		CommitCount:  prData.Commits,
-		Branch:       prData.Head.Ref,
+		PRs: prDetailsList,
 	}, nil
 }
 
