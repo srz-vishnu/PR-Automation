@@ -8,7 +8,11 @@ import (
 )
 
 type SaveEmployeePRRequest struct {
-	Status string `json:"status" validate:"required"`
+	PRs []SinglePR `json:"prs" validate:"required,dive"`
+}
+
+type SinglePR struct {
+	Status  string `json:"status" validate:"required"`
 	StaffID string `json:"staff_id" validate:"required"`
 	PRLink  string `json:"pr_link" validate:"required,url"`
 }
