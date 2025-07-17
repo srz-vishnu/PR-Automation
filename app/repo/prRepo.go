@@ -26,6 +26,7 @@ type PrRepo interface {
 	SavePRReport(report *domain.PRReport) error
 	FetchReportsByStaffID(empIDs []string) ([]domain.PRReport, error)
 	BuildMailBody(reports []domain.PRReport) string
+	GetAllOpenOrDraftPRsByEmpID(empID string) ([]domain.PullRequest, error)
 }
 
 type PrRepoImpl struct {
@@ -196,4 +197,23 @@ func (s *PrRepoImpl) BuildMailBody(reports []domain.PRReport) string {
 
 	sb.WriteString("Regards,\nAdmin")
 	return sb.String()
+}
+
+func (r *PrRepoImpl) GetAllOpenOrDraftPRsByEmpID(empID string) ([]domain.PullRequest, error) {
+	var employee domain.Employee
+	if err := r.db.Where("emp_id = ?", empID).First(&employee).Error; err != nil {
+		return nil, err
+	}
+
+	var prs []domain.PullRequest
+	err := r.db.
+		Where("employee_id = ? AND status IN ?", employee.ID, []string{"open", "draft"}).
+		Order("updated_at DESC").
+		Find(&prs).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	return prs, nil
 }

@@ -12,17 +12,24 @@ type PRDetailsEmployeeID struct {
 	StaffID string `json:"staff_id" validate:"required"`
 }
 
-type PRDetailsResponse struct {
+// New: Struct for a single PR's details
+// Used for multiple PRs in PRDetailsResponse
+type SinglePRDetails struct {
 	Owner        string `json:"owner"`
 	Title        string `json:"title"`
 	Description  string `json:"description"`
-	Status       string `json:"status"` // open, merged, etc.
+	Status       string `json:"status"`
 	IsMerged     bool   `json:"is_merged"`
 	Files        int    `json:"files_changed"`
 	LinesAdded   int    `json:"lines_added"`
 	LinesRemoved int    `json:"lines_removed"`
 	CommitCount  int    `json:"commit_count"`
 	Branch       string `json:"branch"`
+	PRLink       string `json:"pr_link"`
+}
+
+type PRDetailsResponse struct {
+	PRs []SinglePRDetails `json:"prs"`
 }
 
 func (args *PRDetailsEmployeeID) Parse(r *http.Request) error {
