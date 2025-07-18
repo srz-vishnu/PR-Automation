@@ -208,7 +208,7 @@ func (s *prServiceImpl) GeneratePRDetails(r *http.Request) (*dto.PRDetailsRespon
 			Name:         owner,
 			PRID:         pr.ID,
 			Date:         time.Now().Truncate(24 * time.Hour),
-			Description:  pr.Description,
+			Description:  prData.Body, // Use PR description from GitHub
 			LinesAdded:   prData.Additions,
 			LinesRemoved: prData.Deletions,
 			FilesChanged: prData.ChangedFiles,
@@ -219,7 +219,12 @@ func (s *prServiceImpl) GeneratePRDetails(r *http.Request) (*dto.PRDetailsRespon
 			log.Error().Err(err).Msg("Failed to save daily PR details")
 		}
 
-		err = s.prRepo.UpdatePRDetails(int64(pr.ID), prData)
+		// Update PR with pr_number, repo_name, source_branch, and description
+		pr.PRNumber = prNumber
+		pr.RepoName = repo
+		pr.BranchName = prData.Head.Ref
+		pr.Description = prData.Body
+		err = s.prRepo.UpdatePullRequest(&pr)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to update PR details in DB")
 		}
@@ -263,38 +268,58 @@ func (s *prServiceImpl) GeneratePRReport(r *http.Request) (*dto.PRReportResponse
 	}
 	log.Info().Msg("Successfully completed parsing and validation of request body")
 
-	//  checkingg employee is there on db and getting the pr details also
-	pr, err := s.prRepo.ValidPRByEmpID(args.StaffID)
-	if err != nil {
-		return nil, e.NewError(e.ErrResourceNotFound, "No recent PR found for this employee", err)
+	// Fetch all today's PRSnapshots for this employee
+	snaps, err := s.prRepo.GetTodaySnapshotsByEmpID(args.StaffID)
+	if err != nil || len(snaps) == 0 {
+		return nil, e.NewError(e.ErrResourceNotFound, "No PR snapshots found for this employee today", err)
 	}
-	log.Info().Msg("Successfully got pr details from table")
+	log.Info().Msgf("Found %d PR snapshots for today", len(snaps))
 
-	snap, err := s.prRepo.GetLatestSnapshot(pr.ID)
-	if err != nil {
-		return nil, e.NewError(e.ErrResourceNotFound, "No snapshot found for PR", err)
+	// Fetch all PRs for these snapshots and save a report for each
+	var reportText string
+	var savedReports []domain.PRReport
+	for _, snap := range snaps {
+		pr, err := s.prRepo.GetPRByID(snap.PRID)
+		if err != nil {
+			log.Error().Err(err).Msgf("No PR found for snapshot PRID: %d", snap.PRID)
+			continue
+		}
+		text := s.prRepo.BuildReportFromSnapshot(pr, &snap)
+		reportText += text + "\n---\n"
+
+		// Check if a report for this employee, PR, and today already exists
+		today := time.Now().Truncate(24 * time.Hour)
+		exists, err := s.prRepo.ReportExistsForEmpAndDateAndPR(args.StaffID, today, pr.PRLink)
+		if err != nil {
+			return nil, e.NewError(e.ErrSavingPRReport, "Failed to check for existing report", err)
+		}
+		if exists {
+			log.Info().Msgf("Report for %s and PR %s already exists for today, skipping save", args.StaffID, pr.PRLink)
+			continue
+		}
+
+		report := &domain.PRReport{
+			EmpID:      args.StaffID,
+			PRLink:     pr.PRLink,
+			Status:     pr.Status,
+			ReportText: text,
+			IsMailSent: false,
+		}
+		if err := s.prRepo.SavePRReport(report); err != nil {
+			return nil, e.NewError(e.ErrSavingPRReport, "Failed to store PR report", err)
+		}
+		savedReports = append(savedReports, *report)
 	}
-	log.Info().Msg("Successfully got daily PR detials")
 
-	reportText := s.prRepo.BuildReportFromSnapshot(pr, snap)
-
-	// Saving the report in reports table
-	report := &domain.PRReport{
-		EmpID:      args.StaffID,
-		PRLink:     pr.PRLink,
-		Status:     pr.Status,
-		ReportText: reportText,
-		IsMailSent: false,
-	}
-	if err := s.prRepo.SavePRReport(report); err != nil {
-		return nil, e.NewError(e.ErrSavingPRReport, "Failed to store PR report", err)
+	if reportText == "" {
+		return nil, e.NewError(e.ErrResourceNotFound, "No valid PR reports could be built for this employee today", nil)
 	}
 
-	fmt.Println(reportText)
+	log.Info().Msgf("Generated PR report for %s: \n%s", args.StaffID, reportText)
 
 	return &dto.PRReportResponse{
 		EmpID:      args.StaffID,
-		PRLink:     pr.PRLink,
+		PRLink:     "",
 		ReportText: reportText,
 	}, nil
 }
@@ -321,6 +346,10 @@ func (s *prServiceImpl) SendPRMail(r *http.Request) error {
 	}
 	log.Info().Msgf("Successfully fetched reports: %d", len(reports))
 
+	if len(reports) == 0 {
+		return e.NewError(e.ErrFetchingPRReport, "No unsent PR reports found for these employees", nil)
+	}
+
 	// Build mail body
 	body := s.prRepo.BuildMailBody(reports)
 
@@ -328,6 +357,16 @@ func (s *prServiceImpl) SendPRMail(r *http.Request) error {
 	err = smtp.SendEmail(body)
 	if err != nil {
 		return e.NewError(e.ErrSendMail, "Failed to send mail", err)
+	}
+
+	// Mark reports as mailed
+	reportIDs := make([]uint, 0, len(reports))
+	for _, r := range reports {
+		reportIDs = append(reportIDs, r.ID)
+	}
+	err = s.prRepo.MarkReportsAsMailed(reportIDs)
+	if err != nil {
+		return e.NewError(e.ErrSendMail, "Failed to update mail sent status", err)
 	}
 	//status true
 

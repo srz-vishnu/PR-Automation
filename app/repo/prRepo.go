@@ -27,6 +27,11 @@ type PrRepo interface {
 	FetchReportsByStaffID(empIDs []string) ([]domain.PRReport, error)
 	BuildMailBody(reports []domain.PRReport) string
 	GetAllOpenOrDraftPRsByEmpID(empID string) ([]domain.PullRequest, error)
+	GetTodaySnapshotsByEmpID(empID string) ([]domain.PRSnapshot, error)
+	GetPRByID(prID uint) (*domain.PullRequest, error)
+	ReportExistsForEmpAndDate(empID string, date time.Time) (bool, error)
+	ReportExistsForEmpAndDateAndPR(empID string, date time.Time, prLink string) (bool, error)
+	MarkReportsAsMailed(reportIDs []uint) error
 }
 
 type PrRepoImpl struct {
@@ -120,7 +125,35 @@ func (r *PrRepoImpl) UpdatePRDetails(prID int64, data *dto.GitHubPRResponse) err
 		}).Error
 }
 
+// Fetch all PRSnapshots for an employee for today
+func (r *PrRepoImpl) GetTodaySnapshotsByEmpID(empID string) ([]domain.PRSnapshot, error) {
+	var employee domain.Employee
+	if err := r.db.Where("emp_id = ?", empID).First(&employee).Error; err != nil {
+		return nil, err
+	}
+
+	today := time.Now().Truncate(24 * time.Hour)
+	var snaps []domain.PRSnapshot
+	err := r.db.Where("employee_id = ? AND date = ?", employee.ID, today).Find(&snaps).Error
+	if err != nil {
+		return nil, err
+	}
+	return snaps, nil
+}
+
+// Update SavePRSnapshot to avoid duplicate snapshot for same employee, PR, and date
 func (r *PrRepoImpl) SavePRSnapshot(snapshot *domain.PRSnapshot) error {
+	today := snapshot.Date.Truncate(24 * time.Hour)
+	var existing domain.PRSnapshot
+	err := r.db.Where("employee_id = ? AND pr_id = ? AND date = ?", snapshot.EmployeeID, snapshot.PRID, today).First(&existing).Error
+	if err == nil {
+		// Already exists, update it instead
+		snapshot.ID = existing.ID
+		return r.db.Model(&existing).Updates(snapshot).Error
+	} else if err != gorm.ErrRecordNotFound {
+		return err
+	}
+	// Not found, create new
 	return r.db.Create(snapshot).Error
 }
 
@@ -171,15 +204,12 @@ func (r *PrRepoImpl) SavePRReport(report *domain.PRReport) error {
 
 func (r *PrRepoImpl) FetchReportsByStaffID(empIDs []string) ([]domain.PRReport, error) {
 	var reports []domain.PRReport
-
-	subQuery := r.db.Table("pr_reports").
-		Select("MAX(updated_at)").
-		Where("emp_id = pr.emp_id AND is_mail_sent = false")
-
-	err := r.db.Table("pr_reports AS pr").
-		Where("pr.emp_id IN ? AND pr.updated_at = (?)", empIDs, subQuery).
+	today := time.Now().Truncate(24 * time.Hour)
+	nextDay := today.Add(24 * time.Hour)
+	err := r.db.Table("pr_reports").
+		Where("emp_id IN ? AND created_at >= ? AND created_at < ?", empIDs, today, nextDay).
+		Order("emp_id, created_at").
 		Find(&reports).Error
-
 	return reports, err
 }
 
@@ -216,4 +246,41 @@ func (r *PrRepoImpl) GetAllOpenOrDraftPRsByEmpID(empID string) ([]domain.PullReq
 	}
 
 	return prs, nil
+}
+
+// Fetch a PullRequest by its ID
+func (r *PrRepoImpl) GetPRByID(prID uint) (*domain.PullRequest, error) {
+	var pr domain.PullRequest
+	err := r.db.Table("pull_requests").Where("id = ?", prID).First(&pr).Error
+	if err != nil {
+		return nil, err
+	}
+	return &pr, nil
+}
+
+func (r *PrRepoImpl) ReportExistsForEmpAndDate(empID string, date time.Time) (bool, error) {
+	var count int64
+	start := date.Truncate(24 * time.Hour)
+	end := start.Add(24 * time.Hour)
+	err := r.db.Table("pr_reports").Where("emp_id = ? AND created_at >= ? AND created_at < ?", empID, start, end).Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (r *PrRepoImpl) ReportExistsForEmpAndDateAndPR(empID string, date time.Time, prLink string) (bool, error) {
+	var count int64
+	start := date.Truncate(24 * time.Hour)
+	end := start.Add(24 * time.Hour)
+	err := r.db.Table("pr_reports").Where("emp_id = ? AND pr_link = ? AND created_at >= ? AND created_at < ?", empID, prLink, start, end).Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// Mark reports as mailed after sending
+func (r *PrRepoImpl) MarkReportsAsMailed(reportIDs []uint) error {
+	return r.db.Table("pr_reports").Where("id IN ?", reportIDs).Update("is_mail_sent", true).Error
 }
