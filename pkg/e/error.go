@@ -19,7 +19,10 @@ type HttpError struct {
 }
 
 func (e *WrapError) Error() string {
-	return e.RootCause.Error()
+	if e.RootCause != nil {
+		return e.RootCause.Error()
+	}
+	return e.Msg
 }
 
 // NewError : create a new error instance, get rootcause error and return as WrapError.
